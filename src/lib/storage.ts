@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import { kv } from '@vercel/kv';
+import { createClient, RedisClientType } from 'redis';
 
 export interface LinkStorage {
   save(slug: string, originalUrl: string): Promise<void>;
@@ -9,26 +9,70 @@ export interface LinkStorage {
 }
 
 /**
- * Vercel KV storage implementation for production
- * Uses Vercel's managed Redis service for secure, persistent storage
+ * Redis storage implementation for production
+ * Uses Vercel Redis for secure, persistent storage
  */
-class VercelKVStorage implements LinkStorage {
+class RedisStorage implements LinkStorage {
+  private client: RedisClientType;
+  private connected = false;
+
+  constructor() {
+    // Create Redis client
+    this.client = createClient({
+      url: process.env.REDIS_URL,
+      socket: {
+        connectTimeout: 60000,
+      },
+    });
+
+    // Handle connection events
+    this.client.on('error', (err) => {
+      console.error('Redis Client Error:', err);
+      this.connected = false;
+    });
+
+    this.client.on('connect', () => {
+      console.log('Redis Client Connected');
+      this.connected = true;
+    });
+
+    this.client.on('disconnect', () => {
+      console.log('Redis Client Disconnected');
+      this.connected = false;
+    });
+  }
+
+  private async ensureConnected(): Promise<void> {
+    if (!this.connected) {
+      try {
+        await this.client.connect();
+        this.connected = true;
+      } catch (error) {
+        console.error('Failed to connect to Redis:', error);
+        throw error;
+      }
+    }
+  }
+
   async save(slug: string, originalUrl: string): Promise<void> {
+    await this.ensureConnected();
     const key = `shortlink:${slug}`;
-    await kv.set(key, originalUrl);
+    await this.client.set(key, originalUrl);
     // Set expiration to 1 year (optional)
-    await kv.expire(key, 365 * 24 * 60 * 60);
+    await this.client.expire(key, 365 * 24 * 60 * 60);
   }
 
   async get(slug: string): Promise<string | null> {
+    await this.ensureConnected();
     const key = `shortlink:${slug}`;
-    const result = await kv.get<string>(key);
+    const result = await this.client.get(key);
     return result;
   }
 
   async exists(slug: string): Promise<boolean> {
+    await this.ensureConnected();
     const key = `shortlink:${slug}`;
-    const result = await kv.exists(key);
+    const result = await this.client.exists(key);
     return result === 1;
   }
 }
@@ -96,7 +140,7 @@ class FileStorage implements LinkStorage {
 
 /**
  * In-memory storage implementation
- * Used as fallback when KV is not available
+ * Used as fallback when Redis is not available
  */
 class InMemoryStorage implements LinkStorage {
   private storage = new Map<string, string>();
@@ -116,21 +160,29 @@ class InMemoryStorage implements LinkStorage {
 
 // Create storage based on environment
 function createStorage(): LinkStorage {
-  // Check if we're in production/Vercel environment
-  if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+  // Check if Redis URL is available
+  const hasRedisUrl = process.env.REDIS_URL && process.env.REDIS_URL !== 'database_provisioning_in_progress';
+  
+  // Use Redis whenever URL is available (both dev and production)
+  if (hasRedisUrl) {
     try {
-      // Vercel KV automatically uses environment variables for authentication
-      console.log('Using Vercel KV storage for production environment');
-      return new VercelKVStorage();
+      console.log('Using Redis storage for persistent data storage');
+      return new RedisStorage();
     } catch (error) {
-      console.error('Failed to initialize Vercel KV, falling back to in-memory storage:', error);
-      return new InMemoryStorage();
+      console.error('Failed to initialize Redis, falling back to file storage:', error);
+      return new FileStorage();
     }
   }
   
-  // Use file storage in development
-  console.log('Using file-based storage for development');
-  return new FileStorage();
+  // Use file storage when Redis is not available
+  if (process.env.NODE_ENV === 'development') {
+    console.log('Using file-based storage for development/local environment');
+    return new FileStorage();
+  }
+  
+  // Final fallback to in-memory storage
+  console.log('Using in-memory storage as fallback');
+  return new InMemoryStorage();
 }
 
 export const linkStorage: LinkStorage = createStorage(); 
