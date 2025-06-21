@@ -1,10 +1,36 @@
 import { promises as fs } from 'fs';
 import path from 'path';
+import { kv } from '@vercel/kv';
 
 export interface LinkStorage {
   save(slug: string, originalUrl: string): Promise<void>;
   get(slug: string): Promise<string | null>;
   exists(slug: string): Promise<boolean>;
+}
+
+/**
+ * Vercel KV storage implementation for production
+ * Uses Vercel's managed Redis service for secure, persistent storage
+ */
+class VercelKVStorage implements LinkStorage {
+  async save(slug: string, originalUrl: string): Promise<void> {
+    const key = `shortlink:${slug}`;
+    await kv.set(key, originalUrl);
+    // Set expiration to 1 year (optional)
+    await kv.expire(key, 365 * 24 * 60 * 60);
+  }
+
+  async get(slug: string): Promise<string | null> {
+    const key = `shortlink:${slug}`;
+    const result = await kv.get<string>(key);
+    return result;
+  }
+
+  async exists(slug: string): Promise<boolean> {
+    const key = `shortlink:${slug}`;
+    const result = await kv.exists(key);
+    return result === 1;
+  }
 }
 
 /**
@@ -70,7 +96,7 @@ class FileStorage implements LinkStorage {
 
 /**
  * In-memory storage implementation
- * Used in production environments like Vercel where file system is read-only
+ * Used as fallback when KV is not available
  */
 class InMemoryStorage implements LinkStorage {
   private storage = new Map<string, string>();
@@ -88,13 +114,18 @@ class InMemoryStorage implements LinkStorage {
   }
 }
 
-// Use file storage in development, memory storage in production
-// This prevents file system errors in serverless environments like Vercel
+// Create storage based on environment
 function createStorage(): LinkStorage {
-  // Check if we're in a serverless environment (Vercel)
+  // Check if we're in production/Vercel environment
   if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
-    console.log('Using in-memory storage for production/serverless environment');
-    return new InMemoryStorage();
+    try {
+      // Vercel KV automatically uses environment variables for authentication
+      console.log('Using Vercel KV storage for production environment');
+      return new VercelKVStorage();
+    } catch (error) {
+      console.error('Failed to initialize Vercel KV, falling back to in-memory storage:', error);
+      return new InMemoryStorage();
+    }
   }
   
   // Use file storage in development
