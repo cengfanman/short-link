@@ -69,7 +69,8 @@ class FileStorage implements LinkStorage {
 }
 
 /**
- * In-memory storage implementation (fallback)
+ * In-memory storage implementation
+ * Used in production environments like Vercel where file system is read-only
  */
 class InMemoryStorage implements LinkStorage {
   private storage = new Map<string, string>();
@@ -87,5 +88,18 @@ class InMemoryStorage implements LinkStorage {
   }
 }
 
-// Use file storage in development, memory storage as fallback
-export const linkStorage: LinkStorage = new FileStorage(); 
+// Use file storage in development, memory storage in production
+// This prevents file system errors in serverless environments like Vercel
+function createStorage(): LinkStorage {
+  // Check if we're in a serverless environment (Vercel)
+  if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+    console.log('Using in-memory storage for production/serverless environment');
+    return new InMemoryStorage();
+  }
+  
+  // Use file storage in development
+  console.log('Using file-based storage for development');
+  return new FileStorage();
+}
+
+export const linkStorage: LinkStorage = createStorage(); 
